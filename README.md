@@ -1,4 +1,4 @@
-# PostCSS CSSential
+# CSSential
 
 > [PostCSS](https://github.com/postcss/postcss) plugin to identify annotated blocks of critical CSS and inline them into a page.
 
