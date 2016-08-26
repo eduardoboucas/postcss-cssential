@@ -1,79 +1,112 @@
-var fs = require('fs');
-var postcss = require('postcss');
-var uglifycss = require('uglifycss');
-var gzipSize = require('gzip-size');
-var glob = require('glob');
+'use strict'
 
-function error(err) {
-    return console.log('[CSSential] (!) ERROR: ' + err);
+const fs = require('fs')
+const postcss = require('postcss')
+const uglifycss = require('uglifycss')
+const gzipSize = require('gzip-size')
+const glob = require('glob')
+
+function processFile(css, opts) {
+  return new Promise((resolve, reject) => {
+    const htmlComment = opts.htmlComment || 'cssential'
+    const cssComment = opts.cssComment || '!cssential'
+    const removeOriginal = opts.removeOriginal !== false
+
+    let criticalCss = processNode(css, cssComment, htmlComment)
+
+    // Minifying inline CSS
+    criticalCss = uglifycss.processString(criticalCss)
+
+    const regexPattern = '<!--' + htmlComment + '-->'
+                       + '(.*?)'
+                       + '<!--\/' + htmlComment + '-->'
+
+    const regex = new RegExp(regexPattern, 'g')
+    
+    const inlineStyle = '<!--' + htmlComment + '-->'
+                      + '<style>' + criticalCss + '</style>'
+                      + '<!--/' + htmlComment + '-->'
+
+    const inlineStyleSize = gzipSize.sync(inlineStyle)
+
+    glob(opts.output, {}, (globError, files) => {
+      if (globError) {
+        return reject(globError)
+      }
+
+      let filesRead = 0
+
+      files.forEach(function (file, index, arr) {
+        fs.readFile(file, 'utf8', function (fileError, data) {
+          if (fileError) {
+            return reject(fileError)
+          }
+
+          const newFile = data.replace(regex, inlineStyle)
+
+          fs.writeFile(file, newFile, function (err) {
+            if (err) {
+              return reject(err)
+            }
+
+            if (++filesRead === files.length) {
+              return resolve({
+                files: files.length,
+                size: inlineStyleSize
+              })              
+            }
+          })
+        })
+      })
+    }) 
+  })
 }
 
-module.exports = postcss.plugin('cssential', function (opts) {
-    opts = opts || {};
+function processNode(node, cssComment, removeOriginal) {
+  let output = ''
+  let atRules = {}
 
-    return function (css, result) {
-        var htmlComment = 'cssential' || opts.htmlComment;
-        var cssComment = '!cssential' || opts.cssComment;
-        var removeOriginal = opts.removeOriginal !== false;
+  node.walkComments(function (node) {
+    if (node.text !== cssComment) {
+      return
+    }
 
-        var criticalCss = '';
+    let parent = node.parent
 
-        css.walkComments(function (node) {
-            if (node.text !== cssComment) {
-                return;
-            }
+    // Remove comment
+    node.remove()
 
-            var parent = node.parent;
+    if (parent.parent.type === 'atrule') {
+      atRules[parent.parent.name + ' ' + parent.parent.params] = atRules[parent.parent.name + ' ' + parent.parent.params] || []
+      atRules[parent.parent.name + ' ' + parent.parent.params].push(parent.toString())
+    } else {
+      output += parent.toString()
+    }
 
-            node.remove();
-            criticalCss += parent.toString();
+    if (removeOriginal) {
+      if (parent.parent.nodes.length === 1) {
+        parent.parent.remove()
+      } else {
+        parent.remove()
+      }
+    }
+  })
 
-            if (removeOriginal) {
-                parent.remove();
-            }
-        });
+  Object.keys(atRules).forEach(atRule => {
+    output += '@' + atRule + '{' + atRules[atRule] + '}'
+  })
 
-        // Minifying inline CSS
-        criticalCss = uglifycss.processString(criticalCss);
+  return output
+}
 
-        var regexPattern = '<!--' + htmlComment + '-->';
-        regexPattern += '([^<])*';
-        regexPattern += '<!--\/' + htmlComment + '-->';
+module.exports = postcss.plugin('cssential', (opts) => {
+  opts = opts || {}
 
-        var regex = new RegExp(regexPattern, 'g');
-        var inlineStyle = '<!--' + htmlComment + '-->';
-        inlineStyle += '<style>' + criticalCss + '</style>';
-        inlineStyle += '<!--/' + htmlComment + '-->';
-
-        var inlineStyleSize = gzipSize.sync(inlineStyle);
-
-        glob(opts.output, {}, function (globError, files) {
-            if (globError) {
-                return error(globError);
-            }
-
-            files.forEach(function (file, index, arr) {
-                fs.readFile(file, 'utf8', function (fileError, data) {
-                    if (fileError) {
-                        return error(fileError);
-                    }
-
-                    var newFile = data.replace(regex, inlineStyle);
-
-                    fs.writeFile(file, newFile, function (err) {
-                        if (err) {
-                            return console.log(err);
-                        }
-
-                        console.log('[CSSential] Inline CSS injected to \'' + file + '\' (' + inlineStyleSize + 'b gzipped)');
-                    });
-                });
-            });
-        });
-
-        return {
-            inline: inlineStyle,
-            external: css
-        };
-    };
-});
+  return (css, result) => {
+    return processFile(css, opts).then(output => {
+      console.log('[CSSential] Inline CSS injected to ' + output.files + ' files (' + output.size + 'b gzipped)');
+    }).catch(error => {
+      console.log('[CSSential] (!) ERROR: ' + error)
+    })   
+  }
+})
